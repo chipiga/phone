@@ -9,13 +9,13 @@
 #   Phone.default_country_code
 #   Phone.default_area_code
 #
-require 'active_support/core_ext' # for Class#cattr_accessor, String#present?
+require File.join(File.dirname(__FILE__), 'support')
 require File.join(File.dirname(__FILE__), 'phone_country')
-class Phone    
+class Phone
   NUMBER = '([^0][0-9]{1,7})$'  
   DEFAULT_AREA_CODE = '[2-9][0-8][0-9]' # USA
   
-  attr_accessor :country_code, :area_code, :number
+  attr_accessor :country_code, :area_code, :number, :extension
   
   cattr_accessor :default_country_code
   cattr_accessor :default_area_code  
@@ -28,6 +28,7 @@ class Phone
   
   @@named_formats = {
     :default => "+%c%a%n",
+    :default_with_extension => "+%c%a%nx%x",
     :europe => '+%c (0) %a %f %l',
     :us => "(%a) %f-%l"
   }
@@ -35,14 +36,15 @@ class Phone
   def initialize(*hash_or_args)    
     if hash_or_args.first.is_a?(Hash)
       hash_or_args = hash_or_args.first
-      keys = {:number => :number, :area_code => :area_code, :country_code => :country_code}
+      keys = {:number => :number, :area_code => :area_code, :country_code => :country_code, :extension => :extension}
     else
-      keys = {:number => 0, :area_code => 1, :country_code => 2}
+      keys = {:number => 0, :area_code => 1, :country_code => 2, :extension => 3}
     end
     
     self.number = hash_or_args[ keys[:number] ]
     self.area_code = hash_or_args[ keys[:area_code] ] || self.default_area_code
     self.country_code = hash_or_args[ keys[:country_code] ] || self.default_country_code      
+    self.extension = hash_or_args[ keys[:extension] ]
 
     raise "Must enter number" if self.number.blank?
     raise "Must enter area code or set default area code" if self.area_code.blank?
@@ -54,6 +56,7 @@ class Phone
   def self.parse(string, options={})       
     if string.present?    
       PhoneCountry.load
+      extension = extract_extension(string)
       string = normalize(string)
       
       options[:country_code] ||= self.default_country_code
@@ -62,6 +65,10 @@ class Phone
       parts = split_to_parts(string, options)      
       
       pn = Phone.new(parts) if parts
+      if pn.present? and extension.present?
+        pn.extension = extension
+      end
+      return pn
     end
   end
   
@@ -125,7 +132,7 @@ class Phone
     area_code_regexp = country.area_code || DEFAULT_AREA_CODE
     {
       # 047451588, 013668734
-      :short => Regexp.new('^0(' + area_code_regexp + ')' + NUMBER),
+      :short => Regexp.new('^0?(' + area_code_regexp + ')' + NUMBER),
       # 451588
       :really_short => Regexp.new('^' + NUMBER)
     }    
@@ -138,7 +145,11 @@ class Phone
       arr << format if string_with_number =~ regexp
     end
     
-    raise "Detected more than 1 format for #{string_with_number}" if arr.size > 1
+#    raise "Detected more than 1 format for #{string_with_number}" if arr.size > 1
+    if arr.length > 1
+#      puts %Q{detect_format: more than one format found - #{arr.inspect}}
+      return :really_short
+    end
     arr.first
   end
   
@@ -146,7 +157,29 @@ class Phone
   def self.normalize(string_with_number)
     string_with_number.gsub("(0)", "").gsub(/[^0-9+]/, '').gsub(/^00/, '+')
   end
-  
+
+  # pull off anything that look like an extension
+  #TODO: refactor things so this doesn't change string as a side effect
+  #
+  def self.extract_extension(string)
+    return nil if string.nil?
+    if string.sub! /[ ]*(ext|ex|x|xt|#|:)+[^0-9]*\(*([-0-9]{1,})\)*#?$/i, ''
+      extension = $2
+      return extension
+    end
+    #
+    # We already returned any recognizable extension.
+    # However, we might still have extra junk to the right
+    # of the phone number proper, so just chop it off.
+    #
+    idx = string.rindex(/[0-9]/)
+    return nil if idx.nil?
+    return nil if idx == (string.length - 1)      # at the end
+    string.slice!((idx+1)..-1)                    # chop it
+    return nil
+  end
+
+  # format area_code with trailing zero (e.g. 91 as 091)
   # format area_code with trailing zero (e.g. 91 as 091)
   def area_code_long
     "0" + area_code if area_code
@@ -171,8 +204,9 @@ class Phone
   # * %a - area_code (91)
   # * %A - area_code with leading zero (091)
   # * %n - number (5125486)
-  # * %n1 - first @@n1_length characters of number (configured through Phone.n1_length), default is 3 (512)
-  # * %n2 - last characters of number (5486)
+  # * %f - first @@n1_length characters of number (configured through Phone.n1_length), default is 3 (512)
+  # * %l - last characters of number (5486)
+  # * %x - entire extension
   #
   # if the method argument is a Symbol, it is used as a lookup key for a format String in Phone.named_formats
   #   pn.format(:europe)
@@ -203,11 +237,13 @@ class Phone
   private
   
   def format_number(fmt)
-    fmt.gsub("%c", country_code || "").
+    result = fmt.gsub("%c", country_code || "").
            gsub("%a", area_code || "").
            gsub("%A", area_code_long || "").           
            gsub("%n", number || "").
            gsub("%f", number1 || "").
-           gsub("%l", number2 || "")                          
+           gsub("%l", number2 || "").
+           gsub("%x", extension || "")
+    return result
   end
 end
